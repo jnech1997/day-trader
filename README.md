@@ -9,7 +9,7 @@ Python-based intraday trading system that scans a curated universe of US equitie
 | Path | Description |
 | ---- | ----------- |
 | `day_trading/` | Day trading package (agent orchestration, CLI, strategy config, indicators, risk controls, persistence). |
-| `day_trading_agent.py` | Convenience wrapper so you can run `python trading_agents/day_trading_agent.py`. |
+| `day_trading_agent.py` | Convenience wrapper so you can run `python day_trading_agent.py`. |
 | `requirements.txt` | Shared Python dependencies. |
 | `trading_day_dashboard.sh` | Terminal dashboard that reads `trader_day.sqlite` and surfaces P&L, win-rate, and open positions. |
 | `trader_day.sqlite` / `daytrader.log` | SQLite state DB and rotating log file created at runtime. |
@@ -19,9 +19,9 @@ Python-based intraday trading system that scans a curated universe of US equitie
 ```bash
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -r trading_agents/requirements.txt
-cp trading_agents/.env.example trading_agents/.env  # then edit with your keys
-python trading_agents/day_trading_agent.py
+pip install -r requirements.txt
+cp .env.example .env  # then edit with your keys
+python day_trading_agent.py
 ```
 
 Choose a mode in the CLI prompt:
@@ -30,7 +30,7 @@ Choose a mode in the CLI prompt:
 - `2` -> live trading (requires confirmation and live keys)
 - `3` -> backtest (optionally override the default date range)
 
-Alternatively launch with `python -m day_trading.cli` after `cd trading_agents`.
+Alternatively launch with `python -m day_trading.cli`.
 
 ## Environment Variables
 
@@ -57,7 +57,6 @@ BINANCE_SECRET_KEY=...
 Use the dashboard script while the agent is running:
 
 ```bash
-cd trading_agents
 ./trading_day_dashboard.sh paper
 ```
 
