@@ -11,10 +11,7 @@ Automated intraday system that scans US equities via Alpaca and liquid crypto pa
 
 ## Requirements
 - Python 3.10+ (tested with 3.11)
-- Dependencies from `trading_agents/requirements.txt`
-  ```bash
-  pip install -r trading_agents/requirements.txt
-  ```
+- Dependencies from `../requirements.txt`
 - Alpaca paper/live credentials for equities, and optional BinanceUS keys for live crypto orders
 
 ## Quick Start
@@ -25,18 +22,18 @@ Automated intraday system that scans US equities via Alpaca and liquid crypto pa
    ```
 2. **Install dependencies**
    ```bash
-   pip install -r trading_agents/requirements.txt
+   pip install -r requirements.txt
    ```
-3. **Add a `.env` file** (see example below) at the repository root or wherever you launch `python trading_agents/day_trading_agent.py`.
+3. **Add a `.env` file** (see example below) at the repository root or wherever you launch `python day_trading_agent.py`.
 4. **Run the CLI**
    ```bash
-   python trading_agents/day_trading_agent.py
+   python day_trading_agent.py
    ```
    - Mode `1` (default) -> paper trading against Alpaca's paper API plus BinanceUS public data
    - Mode `2` -> live trading (requires confirmation and live keys)
    - Mode `3` -> backtest; optionally override `BacktestConfig` dates when prompted
 
-You can also launch via module: `python -m day_trading.cli` from within `trading_agents/`.
+You can also launch via module: `python -m day_trading.cli`.
 
 ## Environment Configuration
 `day_trading/settings.py` calls `load_dotenv()` at process start, so populate the required keys in a `.env` file before running the agent. Keep this file out of version control.
@@ -58,7 +55,7 @@ BINANCE_SECRET_KEY=your-binance-secret
 If you omit live keys, the agent will gracefully fall back to paper-only execution.
 
 ## Strategy & Risk Settings
-- Edit `trading_agents/day_trading/config.py` to control:
+- Edit `day_trading/config.py` to control:
   - Tradable universes and timeframes (`STOCK_SYMBOLS`, `CRYPTO_PAIRS`, `*_TIMEFRAMES`)
   - Volume gates, ATR multipliers, RSI guardrails per strategy (`SCALPING`, `MOMENTUM`, `BREAKOUT`)
   - Risk management: per-trade risk budget, open-position limits, max daily loss, and cooldowns
