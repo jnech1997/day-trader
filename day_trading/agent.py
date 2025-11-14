@@ -738,7 +738,7 @@ class DayTradingAgent:
     def run_backtest(self):
         """Run backtest on historical data"""
         logger.info("=" * 80)
-        logger.info("🧪 DAY TRADING BACKTEST - CRYPTO OPTIMIZED")
+        logger.info("🧪 DAY TRADING BACKTEST")
         logger.info("=" * 80)
         logger.info(f"📅 Date range: {BacktestConfig.START} → {BacktestConfig.END}")
         logger.info("=" * 80)
@@ -1061,7 +1061,7 @@ class DayTradingAgent:
     def run(self):
         """Run live/paper day trading"""
         logger.info("=" * 80)
-        logger.info("🚀 DAY TRADING AGENT - CRYPTO OPTIMIZED")
+        logger.info("🚀 DAY TRADING AGENT")
         logger.info("=" * 80)
         logger.info(f"Mode: {'PAPER' if self.paper_trading else '⚠️ LIVE'}")
         logger.info(
