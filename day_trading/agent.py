@@ -1109,6 +1109,79 @@ class DayTradingAgent:
 
                 self._check_exits()
 
+                # Scan stocks
+                for stock in TradingConfig.STOCK_SYMBOLS:
+                    try:
+                        if any(
+                            p["symbol"] == stock for p in self._get_current_positions()
+                        ):
+                            continue
+
+                        if strategy == "scalping":
+                            df = self._get_bars_stock(stock, "5Min", period="10d")
+                            if df is None or len(df) < 50:
+                                continue
+                            df = compute_vwap(df)
+                            df = compute_intraday_indicators(df)
+
+                            signal = ScalpingSignals.check_signal(
+                                df,
+                                TradingConfig.SCALPING,
+                                is_crypto=False,
+                                verbose=True,
+                                symbol=stock,
+                            )
+
+                        elif strategy == "momentum":
+                            df = self._get_bars_stock(stock, "15Min", period="10d")
+                            df_1h = self._get_bars_stock(stock, "1H", period="10d")
+
+                            if df is None or len(df) < 50 or df_1h is None:
+                                continue
+
+                            df = compute_vwap(df)
+                            df = compute_intraday_indicators(df)
+                            df_1h = compute_vwap(df_1h)
+                            df_1h = compute_intraday_indicators(df_1h)
+
+                            signal = MomentumSignals.check_signal(
+                                df,
+                                df_1h,
+                                TradingConfig.MOMENTUM,
+                                is_crypto=False,
+                                verbose=True,
+                                symbol=stock,
+                            )
+
+                        else:
+                            df = self._get_bars_stock(stock, "1H", period="10d")
+                            if df is None or len(df) < 50:
+                                continue
+                            df = compute_vwap(df)
+                            df = compute_intraday_indicators(df)
+
+                            signal = BreakoutSignals.check_signal(
+                                df,
+                                TradingConfig.BREAKOUT,
+                                is_crypto=False,
+                                verbose=True,
+                                symbol=stock,
+                            )
+
+                        if signal:
+                            price = float(df["close"].iloc[-1])
+                            atr = float(df["atr"].iloc[-1])
+                            broker = "alpaca"
+                            self.open_position(
+                                stock, signal, price, atr, strategy, broker
+                            )
+
+                        time.sleep(0.2)
+
+                    except Exception as e:
+                        logger.error(f"Error scanning {stock}: {e}")
+                        continue
+
                 # Scan crypto
                 for pair in TradingConfig.CRYPTO_PAIRS:
                     try:
@@ -1176,7 +1249,7 @@ class DayTradingAgent:
                             )
                             self.open_position(
                                 pair, signal, price, atr, strategy, broker
-                            )
+                            )   
 
                         time.sleep(0.2)
 
