@@ -147,7 +147,8 @@ class ScalpingSignals:
             if long_ok:
                 if verbose:
                     logger.info(
-                        f"✅ Scalping LONG (CRYPTO): Close={price:.2f}, RSI={rsi:.1f}, ATR={atr:.2f}"
+                        f"✅ Scalping LONG (CRYPTO) {symbol}: "
+                        f"Close={price:.2f}, RSI={rsi:.1f}, ATR={atr:.2f}"
                     )
                 return "long"
 
@@ -190,14 +191,16 @@ class ScalpingSignals:
         if long_ok:
             if verbose:
                 logger.info(
-                    f"✅ Scalping LONG (STOCK): Close={price:.2f}, RSI={rsi:.1f}, ATR={atr:.2f}"
+                    f"✅ Scalping LONG (STOCK) "
+                    f"{symbol or 'STOCK'}: Close={price:.2f}, RSI={rsi:.1f}, ATR={atr:.2f}"
                 )
             return "long"
 
         if short_ok:
             if verbose:
                 logger.info(
-                    f"✅ Scalping SHORT (STOCK): Close={price:.2f}, RSI={rsi:.1f}, ATR={atr:.2f}"
+                    f"✅ Scalping SHORT (STOCK) "
+                    f"{symbol or 'STOCK'}: Close={price:.2f}, RSI={rsi:.1f}, ATR={atr:.2f}"
                 )
             return "short"
 
@@ -247,8 +250,10 @@ class MomentumSignals:
                     return None
 
             if verbose:
+                name = symbol or ("CRYPTO" if is_crypto else "STOCK")
                 logger.info(
-                    f"✅ Momentum LONG: Price={last['close']:.2f}, RSI={last['rsi']:.1f}"
+                    f"✅ Momentum LONG {name}: "
+                    f"Price={last['close']:.2f}, RSI={last['rsi']:.1f}"
                 )
             return "long"
 
@@ -271,8 +276,10 @@ class MomentumSignals:
                     return None
 
             if verbose:
+                name = symbol or ("CRYPTO" if is_crypto else "STOCK")
                 logger.info(
-                    f"✅ Momentum SHORT: Price={last['close']:.2f}, RSI={last['rsi']:.1f}"
+                    f"✅ Momentum SHORT {name}: "
+                    f"Price={last['close']:.2f}, RSI={last['rsi']:.1f}"
                 )
             return "short"
 
@@ -309,8 +316,10 @@ class BreakoutSignals:
             and last["rsi"] > 50
         ):
             if verbose:
+                name = symbol or ("CRYPTO" if is_crypto else "STOCK")
                 logger.info(
-                    f"✅ Breakout LONG: Price={last['close']:.2f}, Resistance={last['resistance']:.2f}"
+                    f"✅ Breakout LONG {name}: "
+                    f"Price={last['close']:.2f}, Resistance={last['resistance']:.2f}"
                 )
             return "long"
 
@@ -321,8 +330,10 @@ class BreakoutSignals:
             and last["rsi"] < 50
         ):
             if verbose:
+                name = symbol or ("CRYPTO" if is_crypto else "STOCK")
                 logger.info(
-                    f"✅ Breakout SHORT: Price={last['close']:.2f}, Support={last['support']:.2f}"
+                    f"✅ Breakout SHORT {name}: "
+                    f"Price={last['close']:.2f}, Support={last['support']:.2f}"
                 )
             return "short"
 

@@ -16,7 +16,7 @@ import yfinance as yf
 from .config import BacktestConfig, TradingConfig
 from .database import StateDB
 from .indicators import compute_intraday_indicators, compute_vwap, normalize_df
-from .market import get_active_strategy, is_market_open, should_force_close
+from .market import get_active_strategies, is_market_open, should_force_close
 from .risk import apply_costs, calculate_stops_atr, update_trailing_stop
 from .settings import DB_PATH, logger
 from .signals import BreakoutSignals, MomentumSignals, ScalpingSignals
@@ -27,6 +27,7 @@ class DayTradingAgent:
         self.paper_trading = paper_trading
         self.db = StateDB(DB_PATH)
         self.alpaca = self.crypto = None
+        self.current_day = date.today()
         self.paper_positions: List[Dict] = []
         self.live_positions: Dict[int, Dict] = {}
         self.daily_pnl = 0.0
@@ -343,12 +344,16 @@ class DayTradingAgent:
         positions = self._get_current_positions()
 
         if len(positions) >= TradingConfig.MAX_POSITIONS:
-            logger.debug(f"Max positions reached ({TradingConfig.MAX_POSITIONS})")
+            logger.info(
+                f"ENTRY BLOCKED {symbol} - max positions reached "
+                f"({len(positions)}/{TradingConfig.MAX_POSITIONS})"
+            )
             return False
 
         if self.trades_today >= TradingConfig.MAX_TRADES_PER_DAY:
-            logger.debug(
-                f"Max daily trades reached ({TradingConfig.MAX_TRADES_PER_DAY})"
+            logger.info(
+                f"ENTRY BLOCKED {symbol} - max daily trades reached "
+                f"({self.trades_today}/{TradingConfig.MAX_TRADES_PER_DAY})"
             )
             return False
 
@@ -358,8 +363,14 @@ class DayTradingAgent:
             if time_since_last < timedelta(
                 minutes=TradingConfig.MIN_MINUTES_BETWEEN_TRADES
             ):
-                logger.debug(
-                    f"Cooldown active for {symbol} ({time_since_last.seconds // 60} min)"
+                remaining = (
+                    TradingConfig.MIN_MINUTES_BETWEEN_TRADES
+                    - time_since_last.seconds // 60
+                )
+                logger.info(
+                    f"ENTRY BLOCKED {symbol} - cooldown active "
+                    f"({time_since_last.seconds // 60} min since last trade, "
+                    f"~{max(0, remaining)} min remaining)"
                 )
                 return False
 
@@ -367,7 +378,14 @@ class DayTradingAgent:
         max_exposure = self.start_equity * TradingConfig.MAX_EQUITY_EXPOSURE
 
         if (current_exposure + notional) > max_exposure:
-            logger.debug(f"Max exposure would be exceeded")
+            logger.info(
+                "ENTRY BLOCKED %s - max exposure would be exceeded "
+                "(current=%.2f, new=%.2f, max=%.2f)",
+                symbol,
+                current_exposure,
+                notional,
+                max_exposure,
+            )
             return False
 
         return True
@@ -386,6 +404,10 @@ class DayTradingAgent:
             p for p in self._get_current_positions() if p["symbol"] == symbol
         ]
         if len(symbol_positions) >= TradingConfig.MAX_POSITIONS_PER_SYMBOL:
+            logger.info(
+                f"ENTRY BLOCKED {symbol} - max positions per symbol reached "
+                f"({len(symbol_positions)}/{TradingConfig.MAX_POSITIONS_PER_SYMBOL})"
+            )
             return
 
         is_crypto = "/" in symbol
@@ -401,19 +423,29 @@ class DayTradingAgent:
         qty = risk_amount / stop_dist
 
         if qty * price < TradingConfig.MIN_ORDER_NOTIONAL:
-            logger.debug(
-                f"Position size too small: ${qty * price:.2f} < ${TradingConfig.MIN_ORDER_NOTIONAL}"
+            logger.info(
+                "ENTRY BLOCKED %s - position size too small: $%.2f < $%d",
+                symbol,
+                qty * price,
+                TradingConfig.MIN_ORDER_NOTIONAL,
             )
             return
 
         if not self._can_open_position(symbol, qty * price):
+            logger.info(
+                f"ENTRY BLOCKED {symbol} - risk constraints in _can_open_position"
+            )
             return
 
         target_dist = abs(target - price)
         risk_reward = target_dist / stop_dist
 
         if risk_reward < 1.2:
-            logger.debug(f"Risk-reward too low: {risk_reward:.2f}")
+            logger.info(
+                "ENTRY BLOCKED %s - risk/reward too low: %.2f < 1.20",
+                symbol,
+                risk_reward,
+            )
             return
 
         entry_net, _ = apply_costs(price, price, side, is_crypto)
@@ -946,10 +978,13 @@ class DayTradingAgent:
                 if len(symbol_positions) >= TradingConfig.MAX_POSITIONS_PER_SYMBOL:
                     continue
 
-                lookback_df = df_5m.iloc[: idx + 1]
+                entry_made = False
+
+                # --- Scalping (5m) ---
+                lookback_5m = df_5m.iloc[: idx + 1]
 
                 signal = ScalpingSignals.check_signal(
-                    lookback_df,
+                    lookback_5m,
                     TradingConfig.SCALPING,
                     is_crypto=is_crypto,
                     verbose=True,
@@ -970,39 +1005,159 @@ class DayTradingAgent:
                     target_dist = abs(target - entry_price)
                     risk_reward = target_dist / stop_dist
 
-                    if risk_reward < 1.2:
-                        continue
+                    if risk_reward >= 1.2:
+                        qty = risk_amount / max(stop_dist, 1e-9)
 
-                    qty = risk_amount / max(stop_dist, 1e-9)
+                        if qty * entry_price >= TradingConfig.MIN_ORDER_NOTIONAL:
+                            entry_net, _ = apply_costs(
+                                entry_price, entry_price, signal, is_crypto
+                            )
 
-                    if qty * entry_price < TradingConfig.MIN_ORDER_NOTIONAL:
-                        continue
+                            pos = {
+                                "symbol": symbol,
+                                "side": signal,
+                                "entry": entry_price,
+                                "entry_net": entry_net,
+                                "qty": qty,
+                                "stop": stop,
+                                "target": target,
+                                "entry_time": current_time,
+                                "status": "open",
+                                "strategy": "scalping",
+                            }
+                            positions.append(pos)
+                            last_trade_time[symbol] = current_time
 
-                    entry_net, _ = apply_costs(
-                        entry_price, entry_price, signal, is_crypto
+                            logger.info(
+                                f"  🟢 ENTRY [{symbol}] {signal.upper()} (SCALPING) | "
+                                f"Price: ${entry_price:.2f} | Qty: {qty:.3f} | "
+                                f"Stop: ${stop:.2f} | Target: ${target:.2f} | RR: {risk_reward:.2f}:1 | "
+                                f"Time: {current_time.strftime('%Y-%m-%d %H:%M:%S')}"
+                            )
+                            entry_made = True
+
+                if entry_made:
+                    continue
+
+                # --- Momentum (15m + 1h) ---
+                lookback_15m = df_15m[df_15m["timestamp"] <= current_time]
+                lookback_1h = df_1h[df_1h["timestamp"] <= current_time]
+
+                if len(lookback_15m) >= 50 and not lookback_1h.empty:
+                    signal = MomentumSignals.check_signal(
+                        lookback_15m,
+                        lookback_1h,
+                        TradingConfig.MOMENTUM,
+                        is_crypto=is_crypto,
+                        verbose=True,
+                        symbol=symbol,
                     )
 
-                    pos = {
-                        "symbol": symbol,
-                        "side": signal,
-                        "entry": entry_price,
-                        "entry_net": entry_net,
-                        "qty": qty,
-                        "stop": stop,
-                        "target": target,
-                        "entry_time": current_time,
-                        "status": "open",
-                        "strategy": "scalping",
-                    }
-                    positions.append(pos)
-                    last_trade_time[symbol] = current_time
+                    if signal:
+                        last_15m = lookback_15m.iloc[-1]
+                        entry_price = float(last_15m["close"])
+                        atr = float(last_15m["atr"])
 
-                    logger.info(
-                        f"  🟢 ENTRY [{symbol}] {signal.upper()} | "
-                        f"Price: ${entry_price:.2f} | Qty: {qty:.3f} | "
-                        f"Stop: ${stop:.2f} | Target: ${target:.2f} | RR: {risk_reward:.2f}:1 | "
-                        f"Time: {current_time.strftime('%Y-%m-%d %H:%M:%S')}"
+                        risk_pct = TradingConfig.BASE_RISK_PER_TRADE
+                        risk_amount = self.start_equity * risk_pct
+
+                        stop, target = calculate_stops_atr(
+                            entry_price, atr, signal, "momentum", symbol
+                        )
+                        stop_dist = abs(entry_price - stop)
+                        target_dist = abs(target - entry_price)
+                        risk_reward = target_dist / stop_dist
+
+                        if risk_reward >= 1.2:
+                            qty = risk_amount / max(stop_dist, 1e-9)
+
+                            if qty * entry_price >= TradingConfig.MIN_ORDER_NOTIONAL:
+                                entry_net, _ = apply_costs(
+                                    entry_price, entry_price, signal, is_crypto
+                                )
+
+                                pos = {
+                                    "symbol": symbol,
+                                    "side": signal,
+                                    "entry": entry_price,
+                                    "entry_net": entry_net,
+                                    "qty": qty,
+                                    "stop": stop,
+                                    "target": target,
+                                    "entry_time": current_time,
+                                    "status": "open",
+                                    "strategy": "momentum",
+                                }
+                                positions.append(pos)
+                                last_trade_time[symbol] = current_time
+
+                                logger.info(
+                                    f"  🟢 ENTRY [{symbol}] {signal.upper()} (MOMENTUM) | "
+                                    f"Price: ${entry_price:.2f} | Qty: {qty:.3f} | "
+                                    f"Stop: ${stop:.2f} | Target: ${target:.2f} | RR: {risk_reward:.2f}:1 | "
+                                    f"Time: {current_time.strftime('%Y-%m-%d %H:%M:%S')}"
+                                )
+                                entry_made = True
+
+                if entry_made:
+                    continue
+
+                # --- Breakout (1h) ---
+                lookback_1h = df_1h[df_1h["timestamp"] <= current_time]
+
+                if len(lookback_1h) >= 50:
+                    signal = BreakoutSignals.check_signal(
+                        lookback_1h,
+                        TradingConfig.BREAKOUT,
+                        is_crypto=is_crypto,
+                        verbose=True,
+                        symbol=symbol,
                     )
+
+                    if signal:
+                        last_1h = lookback_1h.iloc[-1]
+                        entry_price = float(last_1h["close"])
+                        atr = float(last_1h["atr"])
+
+                        risk_pct = TradingConfig.BASE_RISK_PER_TRADE
+                        risk_amount = self.start_equity * risk_pct
+
+                        stop, target = calculate_stops_atr(
+                            entry_price, atr, signal, "breakout", symbol
+                        )
+                        stop_dist = abs(entry_price - stop)
+                        target_dist = abs(target - entry_price)
+                        risk_reward = target_dist / stop_dist
+
+                        if risk_reward >= 1.2:
+                            qty = risk_amount / max(stop_dist, 1e-9)
+
+                            if qty * entry_price >= TradingConfig.MIN_ORDER_NOTIONAL:
+                                entry_net, _ = apply_costs(
+                                    entry_price, entry_price, signal, is_crypto
+                                )
+
+                                pos = {
+                                    "symbol": symbol,
+                                    "side": signal,
+                                    "entry": entry_price,
+                                    "entry_net": entry_net,
+                                    "qty": qty,
+                                    "stop": stop,
+                                    "target": target,
+                                    "entry_time": current_time,
+                                    "status": "open",
+                                    "strategy": "breakout",
+                                }
+                                positions.append(pos)
+                                last_trade_time[symbol] = current_time
+
+                                logger.info(
+                                    f"  🟢 ENTRY [{symbol}] {signal.upper()} (BREAKOUT) | "
+                                    f"Price: ${entry_price:.2f} | Qty: {qty:.3f} | "
+                                    f"Stop: ${stop:.2f} | Target: ${target:.2f} | RR: {risk_reward:.2f}:1 | "
+                                    f"Time: {current_time.strftime('%Y-%m-%d %H:%M:%S')}"
+                                )
 
             for pos in positions:
                 if pos["status"] == "open":
@@ -1077,6 +1232,14 @@ class DayTradingAgent:
 
         try:
             while True:
+                today = date.today()
+                if today != self.current_day:
+                    logger.info("📆 New trading day detected - resetting daily stats")
+                    self.current_day = today
+                    self.trades_today = 0
+                    self.daily_pnl = 0.0
+                    self.trade_history = {}
+
                 scan_count += 1
                 logger.info(f"\n{'=' * 80}")
                 logger.info(
@@ -1099,163 +1262,171 @@ class DayTradingAgent:
                     self.close_all_positions()
                     break
 
-                strategy = get_active_strategy()
-                if not strategy:
+                strategies = get_active_strategies()
+                if not strategies:
                     logger.info("⏸️  Outside active trading hours")
                     time.sleep(60)
                     continue
 
-                logger.info(f"📊 Strategy: {strategy.upper()}")
+                logger.info(
+                    "📊 Active strategies: %s",
+                    ", ".join(s.upper() for s in strategies),
+                )
 
                 self._check_exits()
 
-                # Scan stocks
-                for stock in TradingConfig.STOCK_SYMBOLS:
-                    try:
-                        if any(
-                            p["symbol"] == stock for p in self._get_current_positions()
-                        ):
+                for strategy in strategies:
+                    logger.info(f"📊 Running strategy: {strategy.upper()}")
+
+                    # Scan stocks
+                    for stock in TradingConfig.STOCK_SYMBOLS:
+                        try:
+                            if any(
+                                p["symbol"] == stock
+                                for p in self._get_current_positions()
+                            ):
+                                continue
+
+                            if strategy == "scalping":
+                                df = self._get_bars_stock(stock, "5Min", period="10d")
+                                if df is None or len(df) < 50:
+                                    continue
+                                df = compute_vwap(df)
+                                df = compute_intraday_indicators(df)
+
+                                signal = ScalpingSignals.check_signal(
+                                    df,
+                                    TradingConfig.SCALPING,
+                                    is_crypto=False,
+                                    verbose=True,
+                                    symbol=stock,
+                                )
+
+                            elif strategy == "momentum":
+                                df = self._get_bars_stock(stock, "15Min", period="10d")
+                                df_1h = self._get_bars_stock(stock, "1H", period="10d")
+
+                                if df is None or len(df) < 50 or df_1h is None:
+                                    continue
+
+                                df = compute_vwap(df)
+                                df = compute_intraday_indicators(df)
+                                df_1h = compute_vwap(df_1h)
+                                df_1h = compute_intraday_indicators(df_1h)
+
+                                signal = MomentumSignals.check_signal(
+                                    df,
+                                    df_1h,
+                                    TradingConfig.MOMENTUM,
+                                    is_crypto=False,
+                                    verbose=True,
+                                    symbol=stock,
+                                )
+
+                            else:
+                                df = self._get_bars_stock(stock, "1H", period="10d")
+                                if df is None or len(df) < 50:
+                                    continue
+                                df = compute_vwap(df)
+                                df = compute_intraday_indicators(df)
+
+                                signal = BreakoutSignals.check_signal(
+                                    df,
+                                    TradingConfig.BREAKOUT,
+                                    is_crypto=False,
+                                    verbose=True,
+                                    symbol=stock,
+                                )
+
+                            if signal:
+                                price = float(df["close"].iloc[-1])
+                                atr = float(df["atr"].iloc[-1])
+                                broker = "alpaca"
+                                self.open_position(
+                                    stock, signal, price, atr, strategy, broker
+                                )
+
+                            time.sleep(0.2)
+
+                        except Exception as e:
+                            logger.error(f"Error scanning {stock}: {e}")
                             continue
 
-                        if strategy == "scalping":
-                            df = self._get_bars_stock(stock, "5Min", period="10d")
-                            if df is None or len(df) < 50:
-                                continue
-                            df = compute_vwap(df)
-                            df = compute_intraday_indicators(df)
-
-                            signal = ScalpingSignals.check_signal(
-                                df,
-                                TradingConfig.SCALPING,
-                                is_crypto=False,
-                                verbose=True,
-                                symbol=stock,
-                            )
-
-                        elif strategy == "momentum":
-                            df = self._get_bars_stock(stock, "15Min", period="10d")
-                            df_1h = self._get_bars_stock(stock, "1H", period="10d")
-
-                            if df is None or len(df) < 50 or df_1h is None:
+                    # Scan crypto
+                    for pair in TradingConfig.CRYPTO_PAIRS:
+                        try:
+                            if any(
+                                p["symbol"] == pair
+                                for p in self._get_current_positions()
+                            ):
                                 continue
 
-                            df = compute_vwap(df)
-                            df = compute_intraday_indicators(df)
-                            df_1h = compute_vwap(df_1h)
-                            df_1h = compute_intraday_indicators(df_1h)
+                            if strategy == "scalping":
+                                df = self._get_bars_crypto(pair, "5m", limit=200)
+                                if df is None or len(df) < 50:
+                                    continue
+                                df = compute_vwap(df)
+                                df = compute_intraday_indicators(df)
 
-                            signal = MomentumSignals.check_signal(
-                                df,
-                                df_1h,
-                                TradingConfig.MOMENTUM,
-                                is_crypto=False,
-                                verbose=True,
-                                symbol=stock,
-                            )
+                                signal = ScalpingSignals.check_signal(
+                                    df,
+                                    TradingConfig.SCALPING,
+                                    is_crypto=True,
+                                    verbose=True,
+                                    symbol=pair,
+                                )
 
-                        else:
-                            df = self._get_bars_stock(stock, "1H", period="10d")
-                            if df is None or len(df) < 50:
-                                continue
-                            df = compute_vwap(df)
-                            df = compute_intraday_indicators(df)
+                            elif strategy == "momentum":
+                                df = self._get_bars_crypto(pair, "15m", limit=200)
+                                df_1h = self._get_bars_crypto(pair, "1h", limit=200)
 
-                            signal = BreakoutSignals.check_signal(
-                                df,
-                                TradingConfig.BREAKOUT,
-                                is_crypto=False,
-                                verbose=True,
-                                symbol=stock,
-                            )
+                                if df is None or len(df) < 50 or df_1h is None:
+                                    continue
 
-                        if signal:
-                            price = float(df["close"].iloc[-1])
-                            atr = float(df["atr"].iloc[-1])
-                            broker = "alpaca"
-                            self.open_position(
-                                stock, signal, price, atr, strategy, broker
-                            )
+                                df = compute_vwap(df)
+                                df = compute_intraday_indicators(df)
+                                df_1h = compute_vwap(df_1h)
+                                df_1h = compute_intraday_indicators(df_1h)
 
-                        time.sleep(0.2)
+                                signal = MomentumSignals.check_signal(
+                                    df,
+                                    df_1h,
+                                    TradingConfig.MOMENTUM,
+                                    is_crypto=True,
+                                    verbose=True,
+                                    symbol=pair,
+                                )
 
-                    except Exception as e:
-                        logger.error(f"Error scanning {stock}: {e}")
-                        continue
+                            else:
+                                df = self._get_bars_crypto(pair, "1h", limit=200)
+                                if df is None or len(df) < 50:
+                                    continue
+                                df = compute_vwap(df)
+                                df = compute_intraday_indicators(df)
 
-                # Scan crypto
-                for pair in TradingConfig.CRYPTO_PAIRS:
-                    try:
-                        if any(
-                            p["symbol"] == pair for p in self._get_current_positions()
-                        ):
+                                signal = BreakoutSignals.check_signal(
+                                    df,
+                                    TradingConfig.BREAKOUT,
+                                    is_crypto=True,
+                                    verbose=True,
+                                    symbol=pair,
+                                )
+
+                            if signal:
+                                price = float(df["close"].iloc[-1])
+                                atr = float(df["atr"].iloc[-1])
+                                broker = (
+                                    "paper-crypto" if self.paper_trading else "binanceus"
+                                )
+                                self.open_position(
+                                    pair, signal, price, atr, strategy, broker
+                                )
+
+                            time.sleep(0.2)
+
+                        except Exception as e:
+                            logger.error(f"Error scanning {pair}: {e}")
                             continue
-
-                        if strategy == "scalping":
-                            df = self._get_bars_crypto(pair, "5m", limit=200)
-                            if df is None or len(df) < 50:
-                                continue
-                            df = compute_vwap(df)
-                            df = compute_intraday_indicators(df)
-
-                            signal = ScalpingSignals.check_signal(
-                                df,
-                                TradingConfig.SCALPING,
-                                is_crypto=True,
-                                verbose=True,
-                                symbol=pair,
-                            )
-
-                        elif strategy == "momentum":
-                            df = self._get_bars_crypto(pair, "15m", limit=200)
-                            df_1h = self._get_bars_crypto(pair, "1h", limit=200)
-
-                            if df is None or len(df) < 50 or df_1h is None:
-                                continue
-
-                            df = compute_vwap(df)
-                            df = compute_intraday_indicators(df)
-                            df_1h = compute_vwap(df_1h)
-                            df_1h = compute_intraday_indicators(df_1h)
-
-                            signal = MomentumSignals.check_signal(
-                                df,
-                                df_1h,
-                                TradingConfig.MOMENTUM,
-                                is_crypto=True,
-                                verbose=True,
-                                symbol=pair,
-                            )
-
-                        else:
-                            df = self._get_bars_crypto(pair, "1h", limit=200)
-                            if df is None or len(df) < 50:
-                                continue
-                            df = compute_vwap(df)
-                            df = compute_intraday_indicators(df)
-
-                            signal = BreakoutSignals.check_signal(
-                                df,
-                                TradingConfig.BREAKOUT,
-                                is_crypto=True,
-                                verbose=True,
-                                symbol=pair,
-                            )
-
-                        if signal:
-                            price = float(df["close"].iloc[-1])
-                            atr = float(df["atr"].iloc[-1])
-                            broker = (
-                                "paper-crypto" if self.paper_trading else "binanceus"
-                            )
-                            self.open_position(
-                                pair, signal, price, atr, strategy, broker
-                            )   
-
-                        time.sleep(0.2)
-
-                    except Exception as e:
-                        logger.error(f"Error scanning {pair}: {e}")
-                        continue
 
                 positions = self._get_current_positions()
                 logger.info(f"\n✅ Scan complete")

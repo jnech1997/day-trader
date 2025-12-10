@@ -108,24 +108,35 @@ def should_force_close() -> bool:
     return time_minutes >= force_close_minutes
 
 
-def get_active_strategy() -> Optional[str]:
-    """Determine which strategy to use based on time of day"""
+def get_active_strategies() -> list[str]:
+    """Determine which strategies are active based on time of day."""
     hour, minute = get_current_et_time()
     time_minutes = hour * 60 + minute
 
+    active: list[str] = []
+
     for start_h, start_m, end_h, end_m in TradingConfig.MOMENTUM["active_hours"]:
         if start_h * 60 + start_m <= time_minutes < end_h * 60 + end_m:
-            return "momentum"
+            active.append("momentum")
+            break
 
     for start_h, start_m, end_h, end_m in TradingConfig.BREAKOUT["active_hours"]:
         if start_h * 60 + start_m <= time_minutes < end_h * 60 + end_m:
-            return "breakout"
+            active.append("breakout")
+            break
 
     for start_h, start_m, end_h, end_m in TradingConfig.SCALPING["active_hours"]:
         if start_h * 60 + start_m <= time_minutes < end_h * 60 + end_m:
-            return "scalping"
+            active.append("scalping")
+            break
 
-    return None
+    return active
+
+
+def get_active_strategy() -> Optional[str]:
+    """Backward-compatible wrapper returning the first active strategy, if any."""
+    strategies = get_active_strategies()
+    return strategies[0] if strategies else None
 
 
 __all__ = [
@@ -137,4 +148,5 @@ __all__ = [
     "is_market_open",
     "should_force_close",
     "get_active_strategy",
+    "get_active_strategies",
 ]
